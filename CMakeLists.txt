@@ -23,10 +23,14 @@ set(APP_SOURCES
 
 add_executable(${PROJECT_NAME}.elf ${APP_SOURCES})
 
+add_subdirectory("${CMAKE_SOURCE_DIR}/module/GreySensor")
+add_subdirectory("${CMAKE_SOURCE_DIR}/module/tracking")
+
 target_include_directories(${PROJECT_NAME}.elf PRIVATE
     "${CMAKE_SOURCE_DIR}/src"
     "${CMAKE_SOURCE_DIR}/module/key"
-    "${CMAKE_SOURCE_DIR}/module/line"
+    "${CMAKE_SOURCE_DIR}/module/GreySensor"
+    "${CMAKE_SOURCE_DIR}/module/tracking"
     "${CMAKE_SOURCE_DIR}/module/encoder"
     "${CMAKE_SOURCE_DIR}/module/tb6612"
     ${MSPM0_COMMON_INCLUDE_DIRS})
