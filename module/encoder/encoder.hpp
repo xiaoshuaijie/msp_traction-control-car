@@ -187,7 +187,7 @@ class QuadratureDecoder
  *
  * 把四个 QuadratureDecoder 按 前左(FL)/前右(FR)/后左(BL)/后右(BR) 聚合，构造函数
  * 直接使用 SysConfig 生成的 encoder_jie_FLA/FLB/... 等 8 个引脚宏，无需外部传参，
- * 与 module/line/line.hpp 的风格保持一致。
+ * 与 GreySensor 接入层直接绑定 SysConfig 引脚宏的风格保持一致。
  *
  * 用法：
  *   Module::Encoder encoder;

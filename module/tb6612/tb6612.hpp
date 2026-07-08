@@ -130,7 +130,7 @@ class Motor
  *
  * 把四个 Motor 按 前左(FL)/前右(FR)/后左(BL)/后右(BR) 聚合，构造函数直接使用
  * SysConfig 生成的 PWM_0/PWM_1 与 tb6612_* 方向脚宏，无需外部传参，风格与
- * module/line/line.hpp、module/encoder/encoder.hpp 一致。
+ * module/GreySensor/GreySensor.hpp、module/encoder/encoder.hpp 一致。
  *
  * 引脚映射（与 sysconfig/untitled.syscfg 对应）：
  *   FL: PWM_0 通道0(PA17), 方向 AIN1_F(PA14)/AIN2_F(PA18)
@@ -158,12 +158,12 @@ class MotorGroup
   MotorGroup()
       : motors_{{
             // FL: PWM_0 / CC0
-            {{PWM_0_INST, GPIO_PWM_0_C0_IDX,
+            {{PWM_0_INST, GPIO_PWM_0_C1_IDX,
               static_cast<uint32_t>(PWM_0_INST_CLK_FREQ)},
              tb6612_AIN1_F_PORT, tb6612_AIN1_F_PIN, tb6612_AIN1_F_IOMUX,
              tb6612_AIN2_F_PORT, tb6612_AIN2_F_PIN, tb6612_AIN2_F_IOMUX},
             // FR: PWM_0 / CC1
-            {{PWM_0_INST, GPIO_PWM_0_C1_IDX,
+            {{PWM_0_INST, GPIO_PWM_0_C0_IDX,
               static_cast<uint32_t>(PWM_0_INST_CLK_FREQ)},
              tb6612_BIN1_F_PORT, tb6612_BIN1_F_PIN, tb6612_BIN1_F_IOMUX,
              tb6612_BIN2_F_PORT, tb6612_BIN2_F_PIN, tb6612_BIN2_F_IOMUX},
