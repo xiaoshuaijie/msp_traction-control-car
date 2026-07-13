@@ -20,6 +20,32 @@ const char* ValidateTopicName(const char* topic_name)
   return topic_name;
 }
 
+/**
+ * @brief Maps a capture channel to its pulse-width-up completion event.
+ * @param channel DriverLib capture/compare channel index.
+ * @return The channel's unique CC-up event mask, or zero if unsupported.
+ */
+std::uint32_t PulseWidthUpEventMask(DL_TIMER_CC_INDEX channel)
+{
+  switch (channel)
+  {
+    case DL_TIMER_CC_0_INDEX:
+      return DL_TIMER_INTERRUPT_CC0_UP_EVENT;
+    case DL_TIMER_CC_1_INDEX:
+      return DL_TIMER_INTERRUPT_CC1_UP_EVENT;
+    case DL_TIMER_CC_2_INDEX:
+      return DL_TIMER_INTERRUPT_CC2_UP_EVENT;
+    case DL_TIMER_CC_3_INDEX:
+      return DL_TIMER_INTERRUPT_CC3_UP_EVENT;
+    case DL_TIMER_CC_4_INDEX:
+      return DL_TIMER_INTERRUPT_CC4_UP_EVENT;
+    case DL_TIMER_CC_5_INDEX:
+      return DL_TIMER_INTERRUPT_CC5_UP_EVENT;
+    default:
+      return 0U;
+  }
+}
+
 }  // namespace
 
 HC_SR04::HC_SR04(LibXR::ApplicationManager& app, const Resources& resources)
@@ -37,7 +63,10 @@ HC_SR04::HC_SR04(LibXR::ApplicationManager& app, const Resources& resources,
 {
   ASSERT(resources_.capture_timer != nullptr);
   ASSERT(resources_.capture_clock_hz > 0U);
-  ASSERT(resources_.capture_event_mask != 0U);
+  const std::uint32_t expected_capture_event_mask =
+      PulseWidthUpEventMask(resources_.capture_channel);
+  ASSERT(expected_capture_event_mask != 0U);
+  ASSERT(resources_.capture_event_mask == expected_capture_event_mask);
   ASSERT(config_.trigger_frequency_hz > 0U);
   ASSERT(config_.trigger_pulse_width_us > 0U);
   ASSERT(config_.min_distance_mm <= config_.max_distance_mm);
