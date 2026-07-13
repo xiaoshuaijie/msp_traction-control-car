@@ -48,13 +48,18 @@ function Assert-InitializerContains {
 
 $syscfgPath = Join-Path $root 'sysconfig/untitled.syscfg'
 $generatedConfigPath = Join-Path $root 'sysconfig/ti_msp_dl_config.c'
+$generatedHeaderPath = Join-Path $root 'sysconfig/ti_msp_dl_config.h'
 $topLevelCMakePath = Join-Path $root 'CMakeLists.txt'
 $moduleCMakePath = Join-Path $root 'module/HC_SR04/CMakeLists.txt'
 
+Assert-Contains $syscfgPath 'CAPTURE1\.timerPeriod\s*=\s*"50ms"\s*;'
+Assert-Contains $syscfgPath 'CAPTURE1\.timerClkPrescale\s*=\s*40\s*;'
 Assert-Contains $syscfgPath 'CAPTURE1\.captMode\s*=\s*"PULSE_WIDTH"\s*;'
 Assert-Contains $syscfgPath 'PWM3\.timerStartTimer\s*=\s*false\s*;'
+Assert-InitializerContains $generatedConfigPath 'static\s+const\s+DL_TimerG_ClockConfig\s+gCAPTURE_ULTRASONICClockConfig' '\.prescale\s*=\s*39U\b'
 Assert-InitializerContains $generatedConfigPath 'static\s+const\s+DL_TimerG_CaptureConfig\s+gCAPTURE_ULTRASONICCaptureConfig' '\.captureMode\s*=\s*DL_TIMER_CAPTURE_MODE_PULSE_WIDTH_UP\s*,'
 Assert-InitializerContains $generatedConfigPath 'static\s+const\s+DL_TimerG_PWMConfig\s+gPWM_ULTRASONICConfig' '\.startTimer\s*=\s*DL_TIMER_STOP\s*,'
+Assert-Contains $generatedHeaderPath '(?m)^[ \t]*#define[ \t]+CAPTURE_ULTRASONIC_INST_LOAD_VALUE[ \t]+\(49999U\)[ \t]*\r?$'
 Assert-Contains $topLevelCMakePath 'add_subdirectory\(\s*"\$\{CMAKE_SOURCE_DIR\}/module/HC_SR04"\s*\)'
 Assert-Contains $moduleCMakePath 'target_include_directories\(\s*xr\s+PUBLIC\s+\$\{CMAKE_CURRENT_LIST_DIR\}\s*\)'
 Assert-Contains $moduleCMakePath '(?s)target_sources\(\s*xr\s+PRIVATE(?:(?!\)).)*"\$\{CMAKE_CURRENT_LIST_DIR\}/sr04\.cpp"\s*\)'
