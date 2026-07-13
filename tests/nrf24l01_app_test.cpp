@@ -1,17 +1,13 @@
-#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <iostream>
 #include <limits>
 
-#include "NRF24L01App.hpp"
-#include "thread.hpp"
+#include "nrf24l01_state.hpp"
 
 namespace
 {
 
-std::uint32_t g_init_call_count = 0;
-std::uint32_t g_receive_call_count = 0;
-std::uint8_t g_next_receive_status = 0;
 int g_failure_count = 0;
 
 /** Records a failed behavioral expectation. */
@@ -24,192 +20,151 @@ void Expect(bool condition, const char* message)
   }
 }
 
-/** Resets the fake driver and deterministic clock between scenarios. */
-void ResetFixture()
+/** Verifies a custom timeout is pending before, and terminal at, its boundary. */
+void TestCustomTimeoutBoundary()
 {
-  g_init_call_count = 0;
-  g_receive_call_count = 0;
-  g_next_receive_status = 0;
-  std::fill_n(NRF24L01_RxPacket, NRF24L01_RX_PACKET_WIDTH, 0U);
-  LibXR::Thread::SetTime(0);
+  const auto before_timeout =
+      Module::Nrf24l01State::EvaluateTx(0U, 24U, 25U);
+  const auto at_timeout =
+      Module::Nrf24l01State::EvaluateTx(0U, 25U, 25U);
+
+  Expect(before_timeout.outcome ==
+             Module::Nrf24l01State::TxOutcome::kPending,
+         "24 ms must remain pending with a 25 ms timeout");
+  Expect(at_timeout.outcome == Module::Nrf24l01State::TxOutcome::kTimeout,
+         "25 ms must time out with a 25 ms timeout");
 }
 
-/** Verifies construction registers the real adapter instance. */
-void TestRegistersWithApplicationManager()
+/** Verifies TX_DS wins over an elapsed timeout. */
+void TestSuccessHasPriorityOverTimeout()
 {
-  ResetFixture();
-  LibXR::ApplicationManager app;
-  NRF24L01App adapter(app);
+  const auto decision = Module::Nrf24l01State::EvaluateTx(
+      Module::Nrf24l01State::kTxDsMask, 25U, 25U);
 
-  Expect(app.registered_app == &adapter,
-         "constructor must register the adapter instance");
-  Expect(app.register_count == 1U,
-         "constructor must register exactly once");
+  Expect(decision.outcome == Module::Nrf24l01State::TxOutcome::kSuccess,
+         "TX_DS must win over timeout at the same boundary");
 }
 
-/** Verifies the first monitor call initializes without polling. */
-void TestFirstMonitorOnlyInitializes()
+/** Verifies MAX_RT wins over an elapsed timeout. */
+void TestMaximumRetriesHasPriorityOverTimeout()
 {
-  ResetFixture();
-  LibXR::ApplicationManager app;
-  NRF24L01App adapter(app);
+  const auto decision = Module::Nrf24l01State::EvaluateTx(
+      Module::Nrf24l01State::kMaxRtMask, 25U, 25U);
 
-  LibXR::Thread::SetTime(123U);
-  adapter.OnMonitor();
-
-  Expect(g_init_call_count == 1U,
-         "first monitor call must initialize exactly once");
-  Expect(g_receive_call_count == 0U,
-         "first monitor call must not receive");
+  Expect(decision.outcome ==
+             Module::Nrf24l01State::TxOutcome::kMaximumRetries,
+         "MAX_RT must win over timeout at the same boundary");
 }
 
-/** Verifies polling starts exactly at the configured 10 ms boundary. */
-void TestPollPeriodBoundary()
+/** Verifies an impossible pair of terminal flags has highest priority. */
+void TestInvalidStatusHasPriorityOverTerminalFlagsAndTimeout()
 {
-  ResetFixture();
-  LibXR::ApplicationManager app;
-  NRF24L01App adapter(app);
+  const std::uint8_t invalid_status = static_cast<std::uint8_t>(
+      Module::Nrf24l01State::kTxDsMask |
+      Module::Nrf24l01State::kMaxRtMask);
+  const auto decision =
+      Module::Nrf24l01State::EvaluateTx(invalid_status, 25U, 25U);
 
-  LibXR::Thread::SetTime(0U);
-  adapter.OnMonitor();
-  adapter.OnMonitor();
-  Expect(g_receive_call_count == 0U, "0 ms must not poll");
-
-  LibXR::Thread::SetTime(9U);
-  adapter.OnMonitor();
-  Expect(g_receive_call_count == 0U, "9 ms must not poll");
-
-  LibXR::Thread::SetTime(10U);
-  adapter.OnMonitor();
-  Expect(g_receive_call_count == 1U, "10 ms must poll exactly once");
+  Expect(decision.outcome ==
+             Module::Nrf24l01State::TxOutcome::kInvalidStatus,
+         "TX_DS plus MAX_RT must win over success, retries, and timeout");
 }
 
-/** Verifies receive statuses update packet and error state correctly. */
-void TestReceiveStatusAccounting()
+/** Verifies a pending decision has no observable terminal side effects. */
+void TestPendingDecisionDoesNotTransition()
 {
-  ResetFixture();
-  LibXR::ApplicationManager app;
-  NRF24L01App adapter(app);
+  const auto transition = Module::Nrf24l01State::ResolveTerminalTransition(
+      Module::Nrf24l01State::EvaluateTx(0U, 24U, 25U));
 
-  LibXR::Thread::SetTime(0U);
-  adapter.OnMonitor();
+  Expect(transition.target_state ==
+             Module::Nrf24l01State::TerminalState::kUnchanged,
+         "pending TX must keep the current state");
+  Expect(!transition.rearm_subscriber,
+         "pending TX must not rearm the subscriber");
+  Expect(!transition.publish_status,
+         "pending TX must not publish a terminal status");
+  Expect(!transition.requires_reinitialize,
+         "pending TX must not request reinitialization");
+}
 
-  g_next_receive_status = 0U;
-  LibXR::Thread::SetTime(10U);
-  adapter.OnMonitor();
-  Expect(adapter.GetState().receive_status == 0U,
-         "status 0 must be recorded");
-  Expect(adapter.GetState().receive_count == 0U,
-         "status 0 must not increment receive count");
-  Expect(adapter.GetState().error_count == 0U,
-         "status 0 must not increment error count");
+/** Verifies successful TX requests exactly one receive transition/status. */
+void TestSuccessTransitionsToReceiveOnce()
+{
+  const auto transition = Module::Nrf24l01State::ResolveTerminalTransition(
+      Module::Nrf24l01State::EvaluateTx(
+          Module::Nrf24l01State::kTxDsMask, 1U, 25U));
 
-  for (std::uint32_t i = 0; i < NRF24L01_RX_PACKET_WIDTH; ++i)
+  Expect(transition.target_state ==
+             Module::Nrf24l01State::TerminalState::kReceive,
+         "successful TX must transition to RECEIVE");
+  Expect(transition.rearm_subscriber,
+         "successful TX must rearm the subscriber once");
+  Expect(transition.publish_status,
+         "successful TX must publish one terminal status");
+  Expect(!transition.requires_reinitialize,
+         "successful TX must not reinitialize the radio");
+}
+
+/** Verifies every failed terminal outcome requests recovery and reinit. */
+void TestFailedTerminalOutcomesTransitionToRecoveryOnce()
+{
+  const std::array<Module::Nrf24l01State::TxDecision, 3> decisions = {
+      Module::Nrf24l01State::EvaluateTx(
+          Module::Nrf24l01State::kMaxRtMask, 1U, 25U),
+      Module::Nrf24l01State::EvaluateTx(
+          static_cast<std::uint8_t>(Module::Nrf24l01State::kTxDsMask |
+                                    Module::Nrf24l01State::kMaxRtMask),
+          1U, 25U),
+      Module::Nrf24l01State::EvaluateTx(0U, 25U, 25U)};
+
+  for (const auto& decision : decisions)
   {
-    NRF24L01_RxPacket[i] = static_cast<std::uint8_t>(i * 7U + 3U);
+    const auto transition =
+        Module::Nrf24l01State::ResolveTerminalTransition(decision);
+    Expect(transition.target_state ==
+               Module::Nrf24l01State::TerminalState::kRecovering,
+           "failed terminal TX must transition to RECOVERING");
+    Expect(transition.rearm_subscriber,
+           "failed terminal TX must rearm the subscriber once");
+    Expect(transition.publish_status,
+           "failed terminal TX must publish one terminal status");
+    Expect(transition.requires_reinitialize,
+           "failed terminal TX must request reinitialization");
   }
-  g_next_receive_status = 1U;
-  LibXR::Thread::SetTime(20U);
-  adapter.OnMonitor();
-  Expect(adapter.GetState().receive_status == 1U,
-         "status 1 must be recorded");
-  Expect(adapter.GetState().receive_count == 1U,
-         "status 1 must increment receive count");
-  Expect(std::equal(adapter.GetState().receive_data.begin(),
-                    adapter.GetState().receive_data.end(),
-                    NRF24L01_RxPacket),
-         "status 1 must copy the complete 32-byte packet");
-
-  g_next_receive_status = 2U;
-  LibXR::Thread::SetTime(30U);
-  adapter.OnMonitor();
-  Expect(adapter.GetState().error_count == 1U,
-         "status 2 must increment error count");
-
-  g_next_receive_status = 3U;
-  LibXR::Thread::SetTime(40U);
-  adapter.OnMonitor();
-  Expect(adapter.GetState().error_count == 2U,
-         "status 3 must increment error count");
-  Expect(adapter.GetState().receive_count == 1U,
-         "error statuses must not increment receive count");
-  Expect(g_init_call_count == 1U,
-         "error statuses must not reinitialize in the adapter");
 }
 
-/** Verifies unsigned elapsed-time arithmetic across uint32_t wraparound. */
-void TestTimeWraparound()
+/** Verifies recovery timing remains correct across uint32 wrap. */
+void TestRecoveryElapsedUsesWrapSafeBoundary()
 {
-  ResetFixture();
-  LibXR::ApplicationManager app;
-  NRF24L01App adapter(app);
+  constexpr std::uint32_t changed =
+      std::numeric_limits<std::uint32_t>::max() - 10U;
+  constexpr std::uint32_t now = 4U;
 
-  LibXR::Thread::SetTime(std::numeric_limits<std::uint32_t>::max() - 5U);
-  adapter.OnMonitor();
-
-  LibXR::Thread::SetTime(3U);
-  adapter.OnMonitor();
-  Expect(g_receive_call_count == 0U,
-         "9 ms across uint32_t wrap must not poll");
-
-  LibXR::Thread::SetTime(4U);
-  adapter.OnMonitor();
-  Expect(g_receive_call_count == 1U,
-         "10 ms across uint32_t wrap must poll");
+  Expect(!Module::Nrf24l01State::RecoveryElapsed(now, changed, 16U),
+         "recovery must wait before its wrapped boundary");
+  Expect(Module::Nrf24l01State::RecoveryElapsed(now, changed, 15U),
+         "recovery must elapse at its wrapped boundary");
 }
 
 }  // namespace
 
-extern "C"
-{
-
-std::uint8_t NRF24L01_TxAddress[NRF24L01_ADDRESS_WIDTH] = {};
-std::uint8_t NRF24L01_TxPacket[NRF24L01_TX_PACKET_WIDTH] = {};
-std::uint8_t NRF24L01_RxAddress[NRF24L01_ADDRESS_WIDTH] = {};
-std::uint8_t NRF24L01_RxPacket[NRF24L01_RX_PACKET_WIDTH] = {};
-
-std::uint8_t NRF24L01_ReadReg(std::uint8_t) { return 0U; }
-void NRF24L01_ReadRegs(std::uint8_t, std::uint8_t*, std::uint8_t) {}
-void NRF24L01_WriteReg(std::uint8_t, std::uint8_t) {}
-void NRF24L01_WriteRegs(std::uint8_t, std::uint8_t*, std::uint8_t) {}
-void NRF24L01_ReadRxPayload(std::uint8_t*, std::uint8_t) {}
-void NRF24L01_WriteTxPayload(std::uint8_t*, std::uint8_t) {}
-void NRF24L01_FlushTx() {}
-void NRF24L01_FlushRx() {}
-std::uint8_t NRF24L01_ReadStatus() { return 0U; }
-void NRF24L01_PowerDown() {}
-void NRF24L01_StandbyI() {}
-void NRF24L01_Rx() {}
-void NRF24L01_Tx() {}
-
-void NRF24L01_Init() { ++g_init_call_count; }
-
-std::uint8_t NRF24L01_Send() { return 0U; }
-
-std::uint8_t NRF24L01_Receive()
-{
-  ++g_receive_call_count;
-  return g_next_receive_status;
-}
-
-void NRF24L01_UpdateRxAddress() {}
-
-}  // extern "C"
-
 int main()
 {
-  TestRegistersWithApplicationManager();
-  TestFirstMonitorOnlyInitializes();
-  TestPollPeriodBoundary();
-  TestReceiveStatusAccounting();
-  TestTimeWraparound();
+  TestCustomTimeoutBoundary();
+  TestSuccessHasPriorityOverTimeout();
+  TestMaximumRetriesHasPriorityOverTimeout();
+  TestInvalidStatusHasPriorityOverTerminalFlagsAndTimeout();
+  TestPendingDecisionDoesNotTransition();
+  TestSuccessTransitionsToReceiveOnce();
+  TestFailedTerminalOutcomesTransitionToRecoveryOnce();
+  TestRecoveryElapsedUsesWrapSafeBoundary();
 
   if (g_failure_count != 0)
   {
-    std::cerr << g_failure_count << " NRF24L01 adapter test(s) failed.\n";
+    std::cerr << g_failure_count << " NRF24L01 state test(s) failed.\n";
     return 1;
   }
 
-  std::cout << "NRF24L01 adapter behavior tests passed.\n";
+  std::cout << "NRF24L01 state tests passed.\n";
   return 0;
 }

@@ -51,6 +51,7 @@ $generatedConfigPath = Join-Path $root 'sysconfig/ti_msp_dl_config.c'
 $generatedHeaderPath = Join-Path $root 'sysconfig/ti_msp_dl_config.h'
 $topLevelCMakePath = Join-Path $root 'CMakeLists.txt'
 $moduleCMakePath = Join-Path $root 'module/HC_SR04/CMakeLists.txt'
+$pwmHeaderPath = Join-Path $root 'libxr/driver/mspm0/mspm0_pwm.hpp'
 
 Assert-Contains $syscfgPath 'CAPTURE1\.timerPeriod\s*=\s*"50ms"\s*;'
 Assert-Contains $syscfgPath 'CAPTURE1\.timerClkPrescale\s*=\s*40\s*;'
@@ -63,5 +64,6 @@ Assert-Contains $generatedHeaderPath '(?m)^[ \t]*#define[ \t]+CAPTURE_ULTRASONIC
 Assert-Contains $topLevelCMakePath 'add_subdirectory\(\s*"\$\{CMAKE_SOURCE_DIR\}/module/HC_SR04"\s*\)'
 Assert-Contains $moduleCMakePath 'target_include_directories\(\s*xr\s+PUBLIC\s+\$\{CMAKE_CURRENT_LIST_DIR\}\s*\)'
 Assert-Contains $moduleCMakePath '(?s)target_sources\(\s*xr\s+PRIVATE(?:(?!\)).)*"\$\{CMAKE_CURRENT_LIST_DIR\}/sr04\.cpp"\s*\)'
+Assert-Contains $pwmHeaderPath '(?s)#define\s+MSPM0_PWM_INIT\(timer_name,\s*gpio_name\).*DL_Timer_getClockConfig.*divideRatio.*prescale.*MSPM0PWM::Resources'
 
 Write-Output 'HC-SR04 integration checks passed.'

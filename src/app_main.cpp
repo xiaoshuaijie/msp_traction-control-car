@@ -2,278 +2,60 @@
 
 #include <array>
 #include <cstdint>
-#include <cstring>
 
 #include "BitsButtonXR.hpp"
-#include "GreySensor.hpp"
-#include "Tracking.hpp"
-#include "encoder.hpp"
+#include "car_control_support.hpp"
 #include "mspm0_gpio.hpp"
+#include "mspm0_i2c.hpp"
+#include "mspm0_pwm.hpp"
 #include "mspm0_timebase.hpp"
 #include "pid.hpp"
 #include "tb6612.hpp"
 #include "thread.hpp"
 #include "ti_msp_dl_config.h"
+#include "xrobot_main.hpp"
 
-extern "C" {
-// 全局 1. app_main() 局部对象调试指针：Ozone Watch 可直接添加这些符号。
-//         这里只保留局部对象的入口，已经是全局对象的模块不再额外放指针。
+using namespace CarControlSupport;
 
-// 全局 2. 主循环时间观测变量：用于确认控制周期和 dt 计算是否正常。
-volatile uint32_t g_elapsed_ms = 0;
-volatile float g_dt_s = 0.0f;
-volatile float jie = 0.0f;
-// 全局 3. 编码器观测缓存：按 FL/FR/BL/BR 顺序保存方向修正后的数据。
-volatile int32_t g_encoder_count[Module::Encoder::kMotorCount] = {};
-volatile float g_encoder_angle[Module::Encoder::kMotorCount] = {};
-volatile float g_encoder_speed[Module::Encoder::kMotorCount] = {};
-
-struct SpeedFeedForwardParam
-{
-  float static_output;
-  float velocity_gain;
-};
-
-// 全局 4. 四路速度 PID 初始配置：按 FL/FR/BL/BR 顺序集中放置，供启动初始化使用。
-LibXR::PID<float>::Param speed_pid_config[Module::MotorGroup::kMotorCount] = {
-    {
-        .k = 1.0f,
-        .p = 0.36f,
-        .i = 0.20f,
-        .d = 0.0f,
-        .i_limit = 0.5f,
-        .out_limit = 0.45f,
-        .cycle = false,
-    }, // FL
-    {
-        .k = 1.0f,
-        .p = 0.36f,
-        .i = 0.20f,
-        .d = 0.0f,
-        .i_limit = 0.6f,
-        .out_limit = 0.65f,
-        .cycle = false,
-    }, // FR: 现象为速度偏慢，先提高响应和闭环输出余量。
-    {
-        .k = 1.0f,
-        .p = 0.36f,
-        .i = 0.20f,
-        .d = 0.0f,
-        .i_limit = 0.5f,
-        .out_limit = 0.45f,
-        .cycle = false,
-    }, // BL
-    {
-        .k = 1.0f,
-        .p = 0.36f,
-        .i = 0.20f,
-        .d = 0.0f,
-        .i_limit = 0.2f,
-        .out_limit = 0.25f,
-        .cycle = false,
-    }, // BR: 现象为超调严重，先压低 P/I、积分和输出上限。
-};
-// 全局 5. 四路速度前馈配置：按 FL/FR/BL/BR 顺序，支持每个轮子独立调节。
-SpeedFeedForwardParam speed_feedforward_config[Module::MotorGroup::kMotorCount] = {
-    {.static_output = 0.18f, .velocity_gain = 0.075f}, // FL
-    {.static_output = 0.28f, .velocity_gain = 0.085f}, // FR: 速度偏慢，增强前馈。
-    {.static_output = 0.18f, .velocity_gain = 0.075f}, // BL
-    {.static_output = 0.08f, .velocity_gain = 0.075f}, // BR: 超调严重，削弱前馈。
-};
-LibXR::PID<float> speed_pid[Module::MotorGroup::kMotorCount] = {
-    LibXR::PID<float>(speed_pid_config[0]),
-    LibXR::PID<float>(speed_pid_config[1]),
-    LibXR::PID<float>(speed_pid_config[2]),
-    LibXR::PID<float>(speed_pid_config[3]),
-};
-
-// 全局 6. 循迹状态观测变量：保存传感器黑线掩码、偏差和丢线状态。
-volatile uint8_t g_line_raw_mask = 0;
-volatile uint8_t g_line_black_mask = 0;
-volatile uint8_t g_line_active_count = 0;
-volatile float g_line_error = 0.0f;
-volatile bool g_line_lost = false;
-volatile bool g_line_following_enabled = false;
-volatile uint8_t g_grey_sensor_active_low = 0;
-volatile bool g_tracking_topic_ready = false;
-volatile uint32_t g_tracking_sequence = 0;
-volatile uint32_t g_tracking_source_sequence = 0;
-volatile float g_tracking_left_speed = 0.0f;
-volatile float g_tracking_right_speed = 0.0f;
-
-// 全局 7. 按键与驾驶模式观测变量：方便在调试器中确认事件和模式切换。
-volatile uint8_t g_drive_mode = 0;
-volatile uint8_t g_last_button_index = 0xFF;
-volatile uint8_t g_last_button_event = 0xFF;
-volatile float g_forward_distance_m = 0.0f;
-
-// 全局 8. 速度闭环观测变量：目标速度、实测速度、前馈、PID 修正和最终电机输出。
-volatile float g_target_speed[Module::MotorGroup::kMotorCount] = {};
-volatile float g_measured_speed[Module::MotorGroup::kMotorCount] = {};
-volatile float g_feedforward_output[Module::MotorGroup::kMotorCount] = {};
-volatile float g_pid_output[Module::MotorGroup::kMotorCount] = {};
-volatile float g_motor_output[Module::MotorGroup::kMotorCount] = {};
-}
-
-namespace
-{
-
-// 内部 0. GreySensor 硬件别名：顺序必须与 Line_OUT1 -> bit0、Line_OUT8 -> bit7
-//         的掩码位映射一致。
-constexpr std::array<const char*, GreySensor::MAX_CHANNEL_COUNT> kGreySensorAliases = {
-    "grey_sensor_gpio_0", "grey_sensor_gpio_1", "grey_sensor_gpio_2",
-    "grey_sensor_gpio_3", "grey_sensor_gpio_4", "grey_sensor_gpio_5",
-    "grey_sensor_gpio_6", "grey_sensor_gpio_7"};
-
-constexpr std::array<const char*, 4> kButtonAliases = {"btn1", "btn2", "btn3",
-                                                       "btn4"};
-
-constexpr LibXR::GPIO::Configuration kGreySensorInputConfig = {
-    LibXR::GPIO::Direction::INPUT, LibXR::GPIO::Pull::UP};
-
-// 灰度传感器有效电平极性：
-// false = 高电平表示检测到黑线；true = 低电平表示检测到黑线。
-// 若 K2 后 g_line_black_mask 长期为 0xFF 且 g_line_error 接近 0，通常说明这里设反了。
-constexpr bool kGreySensorActiveLow = false;
-
-// 内部 1. 速度环控制周期：主循环每隔这个时间执行一次闭环计算。
-constexpr uint32_t kControlPeriodMs = 5;
-
-// 内部 1.1. 独立驾驶模式参数：K1 前进 50m、K4 原地旋转。
-constexpr float kWheelRadiusM = 0.032f;          // 64mm 轮胎直径
-constexpr float kForwardDistanceTargetM = 50.0f;
-constexpr float kForwardSpeedRadS = 8.0f;
-constexpr float kSpinSpeedRadS = 3.0f;
-constexpr float kSpeedTargetEpsilon = 1e-3f;
-
-constexpr BitsButtonXR::ButtonConstraints kButtonConstraints = {
-    .short_press_time_ms = 50,
-    .long_press_start_time_ms = 1000,
-    .long_press_period_triger_ms = 500,
-    .time_window_time_ms = 300,
-};
-
-enum class DriveMode : uint8_t
-{
-  kIdle = 0,
-  kForwardDistance,
-  kLineFollowing,
-  kSpinInPlace,
-};
-
-// 内部 5. 编码器方向修正表：0=FL, 1=FR, 2=BL, 3=BR，反向就改为 -1。
-constexpr int8_t kEncoderDirection[Module::MotorGroup::kMotorCount] = {
-    1,   // FL
-    -1,  // FR
-    1,   // BL
-    -1,  // BR
-};
-
-// 内部 6. 电机输出方向修正表：让正输出统一表示车轮向前转。
-constexpr int8_t kMotorOutputDirection[Module::MotorGroup::kMotorCount] = {
-    1,   // FL
-    1,  // FR
-    1,   // BL
-    -1,   // BR
-};
-
-void ResetSpeedPids()
-{
-  for (auto& pid : speed_pid)
-  {
-    pid.Reset();
-  }
-}
-
-bool IsLeftMotor(uint8_t index)
-{
-  return index == Module::MotorGroup::kFrontLeft ||
-         index == Module::MotorGroup::kBackLeft;
-}
-
-float AbsFloat(float value)
-{
-  return value >= 0.0f ? value : -value;
-}
-
-float ClampMotorOutput(float output)
-{
-  if (output > 1.0f)
-  {
-    return 1.0f;
-  }
-  if (output < -1.0f)
-  {
-    return -1.0f;
-  }
-  return output;
-}
-
-float CalculateSpeedFeedForward(uint8_t motor_index, float target_speed_rad_s)
-{
-  const float abs_target = AbsFloat(target_speed_rad_s);
-  if (abs_target < kSpeedTargetEpsilon ||
-      motor_index >= Module::MotorGroup::kMotorCount)
-  {
-    return 0.0f;
-  }
-
-  const auto& config = speed_feedforward_config[motor_index];
-  const float direction = target_speed_rad_s > 0.0f ? 1.0f : -1.0f;
-  const float output = config.static_output + config.velocity_gain * abs_target;
-  return direction * ClampMotorOutput(output);
-}
-
-uint8_t ResolveButtonIndex(const char* alias)
-{
-  for (uint8_t i = 0; i < kButtonAliases.size(); ++i)
-  {
-    if (std::strcmp(alias, kButtonAliases[i]) == 0)
-    {
-      return i;
-    }
-  }
-
-  return 0xFF;
-}
-
-float CalculateForwardDistanceM(const Module::Encoder& encoder)
-{
-  float distance_sum = 0.0f;
-  for (uint8_t i = 0; i < Module::Encoder::kMotorCount; ++i)
-  {
-    const auto enc_id = static_cast<Module::Encoder::MotorId>(i);
-    const float encoder_direction = static_cast<float>(kEncoderDirection[i]);
-    distance_sum += encoder.GetAngle(enc_id) * encoder_direction * kWheelRadiusM;
-  }
-
-  float distance = distance_sum / static_cast<float>(Module::Encoder::kMotorCount);
-  return distance > 0.0f ? distance : 0.0f;
-}
-
-void ResetTrackingState(
-    Tracking& tracking,
-    LibXR::Topic::ASyncSubscriber<Tracking::Output>& tracking_subscriber)
-{
-  tracking.Reset();
-  if (tracking_subscriber.Available())
-  {
-    (void)tracking_subscriber.GetData();
-  }
-  tracking_subscriber.StartWaiting();
-}
-
-}  // namespace
+/// 最近一次 GreySensor Topic 完整采样，供 Ozone 调试观察。
+GreySensor::Sample grey_sensor_sample{};
+/// 最近一次 Tracking Topic 完整输出，供 Ozone 调试观察。
+Tracking::Output tracking_output{};
+/// 最近一次 Encoder Topic 四轮采样，供 Ozone 调试观察。
+Module::Encoder::Sample encoder_sample{};
+/// 最近一次 HC-SR04 Topic 完整采样，供 Ozone 调试观察。
+HC_SR04::Sample hc_sr04_sample{};
+/// 最近一次 MPU6050 Topic 完整采样，供 Ozone 调试观察。
+MPU6050::Sample mpu6050_sample{};
+/// 最近一次 NRF24L01 接收 Topic 完整数据包，供 Ozone 调试观察。
+NRF24L01::RxPacket nrf24l01_rx_packet{};
+/// 最近一次 NRF24L01 状态 Topic 完整输出，供 Ozone 调试观察。
+NRF24L01::Status nrf24l01_status{};
+/// 最近一次被主循环消费的按键事件，供 Ozone 调试观察。
+BitsButtonXR::ButtonEventResult button_event{};
+/// 当前控制周期的聚合状态与四轮控制量，供 Ozone 调试观察。
+CarControlSample car_control_sample{};
 
 extern "C" void app_main()
 {
-  // 主流程 1. 时间基准：PID 计时和 Thread::Sleep 都依赖它，必须最先构造。
+  // 主流程 1. 时间与 I2C 基础：先建立系统时间基准，再准备 MPU6050 总线。
+  //           PID 计时和 Thread::Sleep 都依赖 timebase，必须最先构造。
   LibXR::MSPM0Timebase timebase;
   UNUSED(timebase);
+
+  // MSPM0I2C 使用调用方提供的暂存区，缓冲区必须与总线对象保持相同生命周期。
+  std::array<uint8_t, MPU6050::BUFFER_SIZE> mpu6050_i2c_stage_buffer{};
+  LibXR::MSPM0I2C mpu6050_i2c(MSPM0_I2C_INIT(
+      I2C_0, mpu6050_i2c_stage_buffer.data(),
+      mpu6050_i2c_stage_buffer.size(), 8));
 
   // 主流程 2. LED 心跳 GPIO：配置为推挽输出，方便观察主循环是否在跑。
   LibXR::MSPM0GPIO led_gpio(LED_PORT, LED_LED0_PIN, LED_LED0_IOMUX);
   led_gpio.SetConfig(
+      {LibXR::GPIO::Direction::OUTPUT_PUSH_PULL, LibXR::GPIO::Pull::NONE});
+
+  LibXR::MSPM0GPIO buzzer(BEEp_PORT , BEEp_PIN_0_PIN , BEEp_PIN_0_IOMUX );
+  buzzer.SetConfig(
       {LibXR::GPIO::Direction::OUTPUT_PUSH_PULL, LibXR::GPIO::Pull::NONE});
 
   // 主流程 3. K1-K4 上拉按键：BitsButtonXR 用 GPIO 双沿中断唤醒事件状态机。
@@ -301,19 +83,65 @@ extern "C" void app_main()
   LibXR::MSPM0GPIO grey_sensor_gpio_7(Line_OUT8_PORT, Line_OUT8_PIN,
                                       Line_OUT8_IOMUX);
 
+  // 主流程 5. NRF24L01 软件 SPI：CE/CSN 控制收发状态，SCK/MOSI/MISO 传输数据。
+  LibXR::MSPM0GPIO nrf24l01_ce_gpio(
+      NRF24L01_PORT, NRF24L01_CE_PIN, NRF24L01_CE_IOMUX);
+  LibXR::MSPM0GPIO nrf24l01_csn_gpio(
+      NRF24L01_PORT, NRF24L01_CSN_PIN, NRF24L01_CSN_IOMUX);
+  LibXR::MSPM0GPIO nrf24l01_sck_gpio(
+      NRF24L01_PORT, NRF24L01_SCK_PIN, NRF24L01_SCK_IOMUX);
+  LibXR::MSPM0GPIO nrf24l01_mosi_gpio(
+      NRF24L01_PORT, NRF24L01_MOSI_PIN, NRF24L01_MOSI_IOMUX);
+  LibXR::MSPM0GPIO nrf24l01_miso_gpio(
+      NRF24L01_PORT, NRF24L01_MISO_PIN, NRF24L01_MISO_IOMUX);
+
+  // 主流程 6. HC-SR04：TRIG 使用 SysConfig PWM，ECHO 使用 1 MHz 脉宽捕获。
+  const HC_SR04::Resources ultrasonic_resources{
+      MSPM0_PWM_INIT(PWM_ULTRASONIC, GPIO_PWM_ULTRASONIC_C0),
+      CAPTURE_ULTRASONIC_INST,
+      DL_TIMER_CC_0_INDEX,
+      DL_TIMER_INTERRUPT_CC0_UP_EVENT,
+      1000000U};
+
+  // 主流程 7. 硬件与应用模块装配：先用稳定别名注册底层资源，
+  //           再让按键和 XRobotModules 按名称取得依赖，避免直接耦合板级对象。
   LibXR::HardwareContainer hardware(
+      LibXR::Entry<LibXR::I2C>{mpu6050_i2c,
+                               {XRobotModules::kImuI2cAliases[0],
+                                XRobotModules::kImuI2cAliases[1],
+                                XRobotModules::kImuI2cAliases[2]}},
       LibXR::Entry<LibXR::GPIO>{key_gpio_1, {kButtonAliases[0]}},
       LibXR::Entry<LibXR::GPIO>{key_gpio_2, {kButtonAliases[1]}},
       LibXR::Entry<LibXR::GPIO>{key_gpio_3, {kButtonAliases[2]}},
       LibXR::Entry<LibXR::GPIO>{key_gpio_4, {kButtonAliases[3]}},
-      LibXR::Entry<LibXR::GPIO>{grey_sensor_gpio_0, {kGreySensorAliases[0]}},
-      LibXR::Entry<LibXR::GPIO>{grey_sensor_gpio_1, {kGreySensorAliases[1]}},
-      LibXR::Entry<LibXR::GPIO>{grey_sensor_gpio_2, {kGreySensorAliases[2]}},
-      LibXR::Entry<LibXR::GPIO>{grey_sensor_gpio_3, {kGreySensorAliases[3]}},
-      LibXR::Entry<LibXR::GPIO>{grey_sensor_gpio_4, {kGreySensorAliases[4]}},
-      LibXR::Entry<LibXR::GPIO>{grey_sensor_gpio_5, {kGreySensorAliases[5]}},
-      LibXR::Entry<LibXR::GPIO>{grey_sensor_gpio_6, {kGreySensorAliases[6]}},
-      LibXR::Entry<LibXR::GPIO>{grey_sensor_gpio_7, {kGreySensorAliases[7]}});
+      LibXR::Entry<LibXR::GPIO>{
+          grey_sensor_gpio_0, {XRobotModules::kGreySensorAliases[0]}},
+      LibXR::Entry<LibXR::GPIO>{
+          grey_sensor_gpio_1, {XRobotModules::kGreySensorAliases[1]}},
+      LibXR::Entry<LibXR::GPIO>{
+          grey_sensor_gpio_2, {XRobotModules::kGreySensorAliases[2]}},
+      LibXR::Entry<LibXR::GPIO>{
+          grey_sensor_gpio_3, {XRobotModules::kGreySensorAliases[3]}},
+      LibXR::Entry<LibXR::GPIO>{
+          grey_sensor_gpio_4, {XRobotModules::kGreySensorAliases[4]}},
+      LibXR::Entry<LibXR::GPIO>{
+          grey_sensor_gpio_5, {XRobotModules::kGreySensorAliases[5]}},
+      LibXR::Entry<LibXR::GPIO>{
+          grey_sensor_gpio_6, {XRobotModules::kGreySensorAliases[6]}},
+      LibXR::Entry<LibXR::GPIO>{
+          grey_sensor_gpio_7, {XRobotModules::kGreySensorAliases[7]}},
+      LibXR::Entry<LibXR::GPIO>{
+          nrf24l01_ce_gpio, {XRobotModules::kNrfGpioAliases[0]}},
+      LibXR::Entry<LibXR::GPIO>{
+          nrf24l01_csn_gpio, {XRobotModules::kNrfGpioAliases[1]}},
+      LibXR::Entry<LibXR::GPIO>{
+          nrf24l01_sck_gpio, {XRobotModules::kNrfGpioAliases[2]}},
+      LibXR::Entry<LibXR::GPIO>{
+          nrf24l01_mosi_gpio, {XRobotModules::kNrfGpioAliases[3]}},
+      LibXR::Entry<LibXR::GPIO>{
+          nrf24l01_miso_gpio, {XRobotModules::kNrfGpioAliases[4]}});
+
+  // ApplicationManager 统一轮询按键和各传感器模块的非阻塞状态机。
   LibXR::ApplicationManager app_manager;
   BitsButtonXR buttons(
       hardware, app_manager,
@@ -322,16 +150,47 @@ extern "C" void app_main()
        {kButtonAliases[2], false, kButtonConstraints},
        {kButtonAliases[3], false, kButtonConstraints}},
       {});
-  GreySensor grey_sensor(hardware, app_manager,
-                         {kGreySensorAliases[0], kGreySensorAliases[1],
-                          kGreySensorAliases[2], kGreySensorAliases[3],
-                          kGreySensorAliases[4], kGreySensorAliases[5],
-                          kGreySensorAliases[6], kGreySensorAliases[7]},
-                         kGreySensorActiveLow);
-  Tracking tracking(app_manager);
-  LibXR::Topic::ASyncSubscriber<Tracking::Output> tracking_subscriber("tracking");
+
+  // XRobotModules 集中构造所有 Topic/Application 模块；app_main 只保留控制入口。
+  XRobotModules::Config config;
+  config.grey_active_low = kGreySensorActiveLow;
+  XRobotModules modules(hardware, app_manager, ultrasonic_resources, config);
+  Tracking& tracking = modules.TrackingModule();
+  Module::Encoder& encoder = modules.EncoderModule();
+  NRF24L01& radio = modules.RadioModule();
+  HC_SR04& ultrasonic = modules.UltrasonicModule();
+
+  // 异步订阅器保存最近一次完整快照，时间戳用于阻止陈旧数据继续驱动电机。
+  LibXR::Topic::ASyncSubscriber<GreySensor::Sample> grey_sensor_subscriber(
+      config.grey_topic_name);
+  LibXR::Topic::ASyncSubscriber<Tracking::Output> tracking_subscriber(
+      config.tracking_topic_name);
+  LibXR::Topic::ASyncSubscriber<Module::Encoder::Sample> encoder_subscriber(
+      config.encoder.topic_name);
+  LibXR::Topic::ASyncSubscriber<HC_SR04::Sample> hc_sr04_subscriber(
+      config.ultrasonic.topic_name);
+  LibXR::Topic::ASyncSubscriber<MPU6050::Sample> mpu6050_subscriber(
+      config.imu.topic_name);
+  LibXR::Topic::ASyncSubscriber<NRF24L01::RxPacket> nrf24l01_rx_subscriber(
+      config.radio.rx_topic_name);
+  LibXR::Topic::ASyncSubscriber<NRF24L01::Status> nrf24l01_status_subscriber(
+      config.radio.status_topic_name);
+  grey_sensor_subscriber.StartWaiting();
   tracking_subscriber.StartWaiting();
-  g_grey_sensor_active_low = kGreySensorActiveLow ? 1U : 0U;
+  encoder_subscriber.StartWaiting();
+  hc_sr04_subscriber.StartWaiting();
+  mpu6050_subscriber.StartWaiting();
+  nrf24l01_rx_subscriber.StartWaiting();
+  nrf24l01_status_subscriber.StartWaiting();
+  tracking_output = tracking.GetLatestOutput();
+  encoder_sample = encoder.LatestSample();
+  hc_sr04_sample = ultrasonic.GetLatestSample();
+  nrf24l01_status = radio.LatestStatus();
+  uint32_t last_tracking_sample_time_ms = 0U;
+  uint32_t last_encoder_sample_time_ms = 0U;
+  bool has_tracking_sample = false;
+  bool has_encoder_sample = false;
+  car_control_sample.grey_sensor_active_low = kGreySensorActiveLow;
 
   // GreySensor 构造函数内部默认使用 Pull::NONE。这里在接入层显式设置上拉输入，
   // 有效电平极性由 kGreySensorActiveLow 控制，不修改 GreySensor 模块内部逻辑。
@@ -344,22 +203,17 @@ extern "C" void app_main()
     gpio->SetConfig(kGreySensorInputConfig);
   }
 
-  // 主流程 5. 编码器：构造后 Init() 配置 GPIO 双沿中断并开始 4 倍频计数。
-  //           MSPM0GPIO 的 GROUP1_IRQHandler 负责把 GPIOB 中断分发到这里。
-  Module::Encoder encoder;
-  encoder.Init();
-
-  // 主流程 6. 四路 TB6612 电机驱动：初始化 10kHz PWM。
+  // 主流程 7. 四路 TB6612 电机驱动：初始化 10kHz PWM。
   Module::MotorGroup motors;
   motors.Init(10000);
 
-  // 主流程 7. 速度环 PID：每个轮子一个 PID，使用全局 speed_pid_config 初始化。
+  // 主流程 8. 速度环 PID：每个轮子一个 PID，使用全局 speed_pid_config 初始化。
   for (uint8_t i = 0; i < Module::MotorGroup::kMotorCount; ++i)
   {
     speed_pid[i] = LibXR::PID<float>(speed_pid_config[i]);
   }
 
-  // 主流程 8. 主循环状态变量：记录控制周期、LED 心跳和循迹使能状态。
+  // 主流程 9. 主循环状态变量：记录控制周期和 LED 心跳。
   uint32_t last_control_time = LibXR::Thread::GetTime();
   uint32_t last_blink_time = last_control_time;
   bool led_on = false;
@@ -367,46 +221,86 @@ extern "C" void app_main()
 
   while (true)
   {
-    // 主循环 1. 更新时间并驱动应用模块。
-    uint32_t now = LibXR::Thread::GetTime();
+    // 主循环 1. 驱动应用模块，并接收各 Topic 的最新完整快照。
     app_manager.MonitorAll();
+    const uint32_t now = LibXR::Thread::GetTime();
+    if (grey_sensor_subscriber.Available())
+    {
+      grey_sensor_sample = grey_sensor_subscriber.GetData();
+      grey_sensor_subscriber.StartWaiting();
+    }
+    if (encoder_subscriber.Available())
+    {
+      encoder_sample = encoder_subscriber.GetData();
+      last_encoder_sample_time_ms = now;
+      has_encoder_sample = true;
+      encoder_subscriber.StartWaiting();
+    }
+    if (tracking_subscriber.Available())
+    {
+      tracking_output = tracking_subscriber.GetData();
+      last_tracking_sample_time_ms = now;
+      has_tracking_sample = true;
+      tracking_subscriber.StartWaiting();
+    }
+    if (hc_sr04_subscriber.Available())
+    {
+      hc_sr04_sample = hc_sr04_subscriber.GetData();
+      hc_sr04_subscriber.StartWaiting();
+    }
+    if (mpu6050_subscriber.Available())
+    {
+      mpu6050_sample = mpu6050_subscriber.GetData();
+      mpu6050_subscriber.StartWaiting();
+    }
+    if (nrf24l01_rx_subscriber.Available())
+    {
+      nrf24l01_rx_packet = nrf24l01_rx_subscriber.GetData();
+      nrf24l01_rx_subscriber.StartWaiting();
+    }
+    if (nrf24l01_status_subscriber.Available())
+    {
+      nrf24l01_status = nrf24l01_status_subscriber.GetData();
+      nrf24l01_status_subscriber.StartWaiting();
+    }
     const uint32_t elapsed_ms = now - last_control_time;
-    g_elapsed_ms = elapsed_ms;
+    car_control_sample.elapsed_ms = elapsed_ms;
 
     // 主循环 2. 按键事件控制：只消费 PRESSED 事件，避免长按期间反复触发动作。
-    BitsButtonXR::ButtonEventResult button_event{};
     while (buttons.GetEventResult(button_event))
     {
-      g_last_button_event = static_cast<uint8_t>(button_event.event_type);
       if (button_event.event_type != BitsButtonXR::ButtonEvent::PRESSED)
       {
         continue;
       }
 
       const uint8_t button_index = ResolveButtonIndex(button_event.key_alias);
-      g_last_button_index = button_index;
 
       switch (button_index)
       {
         case 0:  // K1：编码器闭环前进 50m。
           drive_mode = DriveMode::kForwardDistance;
-          g_forward_distance_m = 0.0f;
-          encoder.ResetAll();
-          ResetTrackingState(tracking, tracking_subscriber);
+          car_control_sample.forward_distance_m = 0.0f;
+          ResetEncoderState(encoder, encoder_subscriber, encoder_sample,
+                            has_encoder_sample);
+          ResetTrackingState(tracking, tracking_subscriber, tracking_output,
+                             has_tracking_sample);
           ResetSpeedPids();
           last_control_time = now;
           break;
 
         case 1:  // K2：进入循迹模式。
           drive_mode = DriveMode::kLineFollowing;
-          ResetTrackingState(tracking, tracking_subscriber);
+          ResetTrackingState(tracking, tracking_subscriber, tracking_output,
+                             has_tracking_sample);
           ResetSpeedPids();
           last_control_time = now;
           break;
 
         case 2:  // K3：退出所有运动模式并滑行停止。
           drive_mode = DriveMode::kIdle;
-          ResetTrackingState(tracking, tracking_subscriber);
+          ResetTrackingState(tracking, tracking_subscriber, tracking_output,
+                             has_tracking_sample);
           ResetSpeedPids();
           motors.CoastAll();
           last_control_time = now;
@@ -424,7 +318,8 @@ extern "C" void app_main()
             drive_mode = DriveMode::kSpinInPlace;
             last_control_time = now;
           }
-          ResetTrackingState(tracking, tracking_subscriber);
+          ResetTrackingState(tracking, tracking_subscriber, tracking_output,
+                             has_tracking_sample);
           ResetSpeedPids();
           break;
 
@@ -433,43 +328,34 @@ extern "C" void app_main()
       }
     }
 
-    // 主循环 3. 驾驶模式 + 速度闭环：固定周期执行。
+    // 主循环 3. 驾驶模式 + 速度闭环：固定周期执行，并检查 Topic 数据新鲜度。
     if (elapsed_ms >= kControlPeriodMs)
     {
       last_control_time = now;
       const float dt_s = static_cast<float>(elapsed_ms) * 0.001f;
-      g_dt_s = dt_s;
-      Tracking::Output tracking_output = tracking.GetLatestOutput();
-      g_tracking_topic_ready = tracking_subscriber.Available();
-      if (g_tracking_topic_ready)
-      {
-        tracking_output = tracking_subscriber.GetData();
-        tracking_subscriber.StartWaiting();
-      }
+      car_control_sample.control_time_ms = now;
+      car_control_sample.dt_s = dt_s;
+      const bool encoder_topic_fresh = ControlTopicLogic::IsFresh(
+          has_encoder_sample, last_encoder_sample_time_ms, now,
+          kTopicFreshnessTimeoutMs);
+      const bool tracking_topic_fresh = ControlTopicLogic::IsFresh(
+          has_tracking_sample, last_tracking_sample_time_ms, now,
+          kTopicFreshnessTimeoutMs);
+      car_control_sample.encoder_topic_ready = encoder_topic_fresh;
+      car_control_sample.tracking_topic_ready = tracking_topic_fresh;
 
-      // 主循环 4. 循迹观测：保存黑线掩码、误差和丢线状态。
-      g_line_raw_mask = tracking_output.raw_mask;
-      g_line_black_mask = tracking_output.black_mask;
-      g_line_active_count = tracking_output.active_count;
-      g_tracking_sequence = tracking_output.sequence;
-      g_tracking_source_sequence = tracking_output.source_sequence;
-      g_tracking_left_speed = tracking_output.left_speed_rad_s;
-      g_tracking_right_speed = tracking_output.right_speed_rad_s;
-      if (drive_mode == DriveMode::kLineFollowing)
-      {
-        g_line_error = tracking_output.error;
-        g_line_lost = tracking_output.lost_line;
-      }
-      else
-      {
-        g_line_error = 0.0f;
-        g_line_lost = tracking_output.lost_line;
-      }
+      // 主循环 4. 循迹观测：完整 Tracking 输出保存在 tracking_output，
+      //           控制快照仅补充 Topic 新鲜度相关的综合丢线状态。
+      car_control_sample.line_lost =
+          !tracking_topic_fresh || tracking_output.lost_line;
 
-      if (drive_mode == DriveMode::kForwardDistance)
+      // 主循环 5. 定距前进：只用新鲜编码器快照累计路程，到达 50m 后滑行停止。
+      if (drive_mode == DriveMode::kForwardDistance && encoder_topic_fresh)
       {
-        g_forward_distance_m = CalculateForwardDistanceM(encoder);
-        if (g_forward_distance_m >= kForwardDistanceTargetM)
+        car_control_sample.forward_distance_m =
+            CalculateForwardDistanceM(encoder_sample);
+        if (car_control_sample.forward_distance_m >=
+            kForwardDistanceTargetM)
         {
           drive_mode = DriveMode::kIdle;
           ResetSpeedPids();
@@ -477,37 +363,28 @@ extern "C" void app_main()
         }
       }
 
-      // 主循环 5. 四轮速度闭环：读取编码器，计算 PID 输出，再驱动电机。
+      // 主循环 6. 四轮速度闭环：读取编码器，计算 PID 输出，再驱动电机。
       for (uint8_t i = 0; i < Module::MotorGroup::kMotorCount; ++i)
       {
-        auto enc_id = static_cast<Module::Encoder::MotorId>(i);
         auto mot_id = static_cast<Module::MotorGroup::MotorId>(i);
 
-        // 主循环 6. 方向修正：统一编码器正方向和电机正输出。
+        // 主循环 7. 方向修正：统一编码器正方向和电机正输出。
         const float encoder_direction = static_cast<float>(kEncoderDirection[i]);
         const float motor_direction = static_cast<float>(kMotorOutputDirection[i]);
 
-        float measured = encoder.GetSpeed(enc_id) * encoder_direction;
-        float target = 0.0f;
+        float measured = encoder_topic_fresh
+                             ? encoder_sample.speed_rad_s[i] * encoder_direction
+                             : 0.0f;
+        float target = ResolveTargetSpeed(
+            drive_mode, i, tracking_output, encoder_topic_fresh,
+            tracking_topic_fresh);
         float feedforward = 0.0f;
         float pid_correction = 0.0f;
         float motor_output = 0.0f;
 
-        // 主循环 7. 根据驾驶模式生成四轮目标速度。
-        if (drive_mode == DriveMode::kForwardDistance)
-        {
-          target = kForwardSpeedRadS;
-        }
-        else if (drive_mode == DriveMode::kLineFollowing)
-        {
-          target = tracking_output.wheel_speed_rad_s[i];  // Tracking topic 目标转速
-        }
-        else if (drive_mode == DriveMode::kSpinInPlace)
-        {
-          target = IsLeftMotor(i) ? kSpinSpeedRadS : -kSpinSpeedRadS;
-        }
-
-        if (drive_mode != DriveMode::kIdle)
+        // 主循环 8. 根据驾驶模式和 Topic 新鲜度生成四轮目标速度。
+        if (ControlTopicLogic::ShouldRunSpeedController(
+                drive_mode != DriveMode::kIdle, encoder_topic_fresh))
         {
           if (AbsFloat(target) < kSpeedTargetEpsilon)
           {
@@ -522,33 +399,36 @@ extern "C" void app_main()
             motor_output = control_output * motor_direction;
           }
         }
+        else if (!encoder_topic_fresh)
+        {
+          speed_pid[i].Reset();
+        }
         motors.SetOutput(mot_id, motor_output);  // motor_output 范围为 [-1, 1]
 
-        // 主循环 8. 同步四路调试变量：方便 Ozone 查看闭环输入和输出。
-        g_encoder_count[i] = encoder.GetCount(enc_id) * kEncoderDirection[i];
-        g_encoder_angle[i] = encoder.GetAngle(enc_id) * encoder_direction;
-        g_encoder_speed[i] = measured;
-        g_target_speed[i] = target;
-        g_measured_speed[i] = measured;
-        g_feedforward_output[i] = feedforward;
-        g_pid_output[i] = pid_correction;
-        g_motor_output[i] = motor_output;
+        // 主循环 9. 同步完整控制快照：方便 Ozone 按车轮查看闭环输入和输出。
+        car_control_sample.target_speed[i] = target;
+        car_control_sample.measured_speed[i] = measured;
+        car_control_sample.feedforward_output[i] = feedforward;
+        car_control_sample.pid_output[i] = pid_correction;
+        car_control_sample.motor_output[i] = motor_output;
       }
 
     }
     //  motors.SetOutput(Module::MotorGroup::kFrontRight, 0.4f); 
-    g_drive_mode = static_cast<uint8_t>(drive_mode);
-    g_line_following_enabled = drive_mode == DriveMode::kLineFollowing;
 
-    // 主循环 9. LED 心跳：每 200ms 翻转一次，确认主循环仍在运行。
+    // 主循环 10. 驾驶模式由局部状态机持有，只向调试快照单向同步。
+    car_control_sample.drive_mode = drive_mode;
+
+    // 主循环 11. LED 心跳：每 200ms 翻转一次，确认主循环仍在运行。
     if (now - last_blink_time >= 200)
     {
       last_blink_time = now;
       led_on = !led_on;
       led_gpio.Write(led_on);
+      buzzer.Write(true);
     }
 
-    // 主循环 10. 主循环让出 1ms，避免空转占满 CPU。
+    // 主循环 12. 主循环让出 1ms，避免空转占满 CPU。
     LibXR::Thread::Sleep(1);
   }
 }

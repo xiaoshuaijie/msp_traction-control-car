@@ -1,5 +1,9 @@
 # MPU6050 与 NRF24L01 接入 app_main 设计
 
+> **已废弃（2026-07-13）**：NRF24L01 不再通过 C API 在 `app_main` 中轮询。
+> 当前实现由 `XRobotModules` 装配 Topic/Application 版本，详见
+> `.helloagents/modules/nrf24l01.md` 与 `.helloagents/modules/xrobot_modules.md`。
+
 ## 目标
 
 将 `module/MPU6050` 和 `module/NRF24L01` 接入现有 `src/app_main.cpp`，保持当前按键、循迹、编码器和电机控制行为不变。

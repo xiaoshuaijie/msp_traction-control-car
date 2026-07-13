@@ -1,0 +1,13 @@
+{
+  "status": "completed",
+  "completed": 6,
+  "failed": 0,
+  "skipped": 0,
+  "pending": 0,
+  "uncertain": 0,
+  "total": 6,
+  "done": 6,
+  "percent": 100,
+  "current": "全部任务完成，准备归档",
+  "updated_at": "2026-07-13 21:59:36"
+}

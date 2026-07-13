@@ -18,6 +18,7 @@ set(APP_SOURCES
     "${CMAKE_SOURCE_DIR}/src/main.c"
     "${CMAKE_SOURCE_DIR}/src/syscalls_stub.c"
     "${CMAKE_SOURCE_DIR}/src/app_main.cpp"
+    "${CMAKE_SOURCE_DIR}/src/car_control_support.cpp"
     "${MSPM0_STARTUP_FILE}"
     "${SYSCFG_C_FILE}")
 
@@ -25,13 +26,21 @@ add_executable(${PROJECT_NAME}.elf ${APP_SOURCES})
 
 add_subdirectory("${CMAKE_SOURCE_DIR}/module/GreySensor")
 add_subdirectory("${CMAKE_SOURCE_DIR}/module/tracking")
+add_subdirectory("${CMAKE_SOURCE_DIR}/module/NRF24L01")
+add_subdirectory("${CMAKE_SOURCE_DIR}/module/MPU6050")
+add_subdirectory("${CMAKE_SOURCE_DIR}/module/encoder")
+add_subdirectory("${CMAKE_SOURCE_DIR}/module/HC_SR04")
 
 target_include_directories(${PROJECT_NAME}.elf PRIVATE
+    "${CMAKE_SOURCE_DIR}"
     "${CMAKE_SOURCE_DIR}/src"
     "${CMAKE_SOURCE_DIR}/module/key"
     "${CMAKE_SOURCE_DIR}/module/GreySensor"
     "${CMAKE_SOURCE_DIR}/module/tracking"
+    "${CMAKE_SOURCE_DIR}/module/NRF24L01"
+    "${CMAKE_SOURCE_DIR}/module/MPU6050"
     "${CMAKE_SOURCE_DIR}/module/encoder"
+    "${CMAKE_SOURCE_DIR}/module/HC_SR04"
     "${CMAKE_SOURCE_DIR}/module/tb6612"
     ${MSPM0_COMMON_INCLUDE_DIRS})
 
@@ -81,4 +90,9 @@ add_custom_command(TARGET ${PROJECT_NAME}.elf POST_BUILD
         ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.hex
     COMMAND ${CMAKE_OBJCOPY} -O binary
         $<TARGET_FILE:${PROJECT_NAME}.elf>
-        ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.bin)
+        ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.bin
+    COMMAND ${CMAKE_COMMAND}
+        "-DFIRMWARE_BIN=${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.bin"
+        "-DFIRMWARE_MAX_SIZE_BYTES=128450"
+        -P "${CMAKE_SOURCE_DIR}/cmake/CheckFirmwareSize.cmake"
+    VERBATIM)

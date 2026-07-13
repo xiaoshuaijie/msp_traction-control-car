@@ -1,5 +1,7 @@
 set(LIBXR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libxr" CACHE PATH "Path to LibXR source tree")
 set(MSPM0_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mspm0-sdk" CACHE PATH "Path to MSPM0 SDK root")
+set(LIBXR_STATIC_BUILD ON CACHE BOOL "Build LibXR as a static library" FORCE)
+set(LIBXR_SHARED_BUILD OFF CACHE BOOL "Do not build LibXR as a shared library" FORCE)
 
 if(NOT EXISTS "${LIBXR_DIR}/CMakeLists.txt")
     message(FATAL_ERROR "LibXR not found. Please set LIBXR_DIR correctly: ${LIBXR_DIR}")

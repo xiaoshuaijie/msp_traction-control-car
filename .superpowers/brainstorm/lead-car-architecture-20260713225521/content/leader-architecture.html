@@ -1,0 +1,160 @@
+<div id="leader-architecture">
+  <style>
+    #leader-architecture .layer {
+      margin-block: 1rem;
+    }
+
+    #leader-architecture .layer-title {
+      margin-bottom: 0.5rem;
+      font-weight: 500;
+    }
+
+    #leader-architecture .flow-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+      gap: 0.75rem;
+    }
+
+    #leader-architecture .node h3 {
+      margin-top: 0;
+    }
+
+    #leader-architecture .node p {
+      margin-bottom: 0;
+    }
+
+    #leader-architecture .arrow {
+      color: var(--muted-foreground);
+      text-align: center;
+      font-weight: 500;
+    }
+
+    #leader-architecture .core-flow {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+      gap: 0.5rem;
+      align-items: stretch;
+    }
+
+    #leader-architecture .core-flow .arrow {
+      align-self: center;
+    }
+
+    #leader-architecture .state-line {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin-top: 0.75rem;
+    }
+
+    #leader-architecture .state-line span {
+      padding: 0.25rem 0.5rem;
+      background: color-mix(in srgb, var(--viz-series-1) 12%, transparent);
+      color: var(--foreground);
+    }
+
+    #leader-architecture .guardrail {
+      border-left: 3px solid var(--viz-series-2);
+      padding-left: 0.75rem;
+      margin-top: 1rem;
+    }
+
+    @media (max-width: 640px) {
+      #leader-architecture .core-flow {
+        grid-template-columns: 1fr;
+      }
+
+      #leader-architecture .core-flow .arrow {
+        transform: rotate(90deg);
+      }
+    }
+  </style>
+
+  <h2>领头车混合事件控制架构</h2>
+  <p class="subtitle">传感器只报告事实，任务状态机决定当前事实代表什么。</p>
+
+  <section class="layer" aria-labelledby="sense-title">
+    <div id="sense-title" class="layer-title">1. 传感层</div>
+    <div class="flow-grid">
+      <div class="card node">
+        <h3>8 路灰度</h3>
+        <p>2-5 ms 采样；输出黑线位置、宽线模式、横线边沿与丢线状态。</p>
+      </div>
+      <div class="card node">
+        <h3>四轮编码器</h3>
+        <p>5 ms 速度采样；输出轮速、累计里程和左右侧一致性。</p>
+      </div>
+      <div class="card node">
+        <h3>MPU6050</h3>
+        <p>航向角速度只做分岔与异常辅助，不承担长期绝对定位。</p>
+      </div>
+      <div class="card node">
+        <h3>按键与无线</h3>
+        <p>按键选择测试项目并启动；NRF24L01 提供命令发送与链路状态。</p>
+      </div>
+    </div>
+  </section>
+
+  <div class="arrow" aria-hidden="true">&#8595;</div>
+
+  <section class="layer" aria-labelledby="core-title">
+    <div id="core-title" class="layer-title">2-4. 估计、决策与控制</div>
+    <div class="core-flow">
+      <div class="card node">
+        <h3>路段与事件估计</h3>
+        <p>将灰度模式与里程窗口融合，生成 A 点、B 分岔、E 等停和计圈事件。</p>
+      </div>
+      <div class="arrow" aria-hidden="true">&#8594;</div>
+      <div class="card node">
+        <h3>任务状态机</h3>
+        <p>按测试项目决定速度档、内外圈、允许识别的事件和下一状态。</p>
+        <div class="state-line" aria-label="主要任务状态">
+          <span>待机</span><span>外圈</span><span>内圈</span><span>等停</span><span>恢复</span><span>终点</span><span>故障</span>
+        </div>
+      </div>
+      <div class="arrow" aria-hidden="true">&#8594;</div>
+      <div class="card node">
+        <h3>分层控制器</h3>
+        <p>速度调度 + 循迹 PD + 四轮速度 PI；停车时使用 TB6612 主动制动。</p>
+      </div>
+    </div>
+  </section>
+
+  <div class="arrow" aria-hidden="true">&#8595;</div>
+
+  <section class="layer" aria-labelledby="output-title">
+    <div id="output-title" class="layer-title">5. 执行与状态输出</div>
+    <div class="flow-grid">
+      <div class="card node">
+        <h3>四轮驱动</h3>
+        <p>TB6612 输出前馈 + PI 校正；异常或终点进入可验证的安全停止。</p>
+      </div>
+      <div class="card node">
+        <h3>本车声光</h3>
+        <p>内圈 B-F-D 点亮 LED；终点调用 <code>buzzer.Write(true)</code> 发声。</p>
+      </div>
+      <div class="card node">
+        <h3>NRF24L01 下行</h3>
+        <p>仅发送任务阶段、目标速度、路径、停车/恢复/结束命令与序号。</p>
+      </div>
+    </div>
+    <p class="guardrail"><strong>安全约束：</strong>传感数据超时、编码器失配、无线模块故障只改变状态机，不允许绕过速度闭环直接写电机。</p>
+  </section>
+
+  <div class="options">
+    <div class="option" data-choice="architecture-approved" onclick="toggleSelect(this)">
+      <div class="letter">A</div>
+      <div class="content">
+        <h3>架构正确</h3>
+        <p>继续细化任务状态机和各测试项目的状态转换。</p>
+      </div>
+    </div>
+    <div class="option" data-choice="architecture-revise" onclick="toggleSelect(this)">
+      <div class="letter">B</div>
+      <div class="content">
+        <h3>需要调整</h3>
+        <p>在终端说明希望修改的层级、模块或控制边界。</p>
+      </div>
+    </div>
+  </div>
+</div>

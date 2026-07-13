@@ -4,7 +4,8 @@ CompileFlags:
         -isystem,/usr/arm-none-eabi/include/c++/15.2.0/backward,
         -isystem,/usr/lib/gcc/arm-none-eabi/15.2.0/include,
         -isystem,/usr/lib/gcc/arm-none-eabi/15.2.0/include-fixed,
-        -isystem,/usr/arm-none-eabi/include]
+        -isystem,/usr/arm-none-eabi/include,
+        -I,E:/msp_exe/msp_traction-control-car/module/NRF24L01]
   Remove: [-fconcepts]
 
 Diagnostics:

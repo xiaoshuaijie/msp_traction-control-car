@@ -30,6 +30,8 @@ void Tracking::Reset()
   // 模式切换或重新开始循迹时清空历史误差，避免旧误差决定新的丢线搜索方向。
   last_error_ = 0.0f;
   has_last_error_ = false;
+  last_valid_output_ = Output{};
+  lost_sample_count_ = 0;
   latest_output_ = Output{};
   has_update_time_ = false;
 }
@@ -95,28 +97,47 @@ float Tracking::ClampNormalSpeed(float speed) const
   return speed;
 }
 
-Tracking::Output Tracking::MakeSearchOutput() const
+Tracking::Output Tracking::MakeRecoveryOutput(bool lost_line) const
 {
-  // 丢线时没有新的误差可算，只能根据最近一次有效误差判断黑线最后在哪边。
-  // last_error_ >= 0 表示黑线最后偏右：左轮正转、右轮反转，车头向右找线。
-  // last_error_ < 0 表示黑线最后偏左：反向搜索。
+  // 题目要求小车只能前进，因此丢线恢复不能让任一侧车轮反转。
+  // last_error_ >= 0 表示黑线最后偏右：左轮前进、右轮停转，车头向右找线。
   const float direction = (!has_last_error_ || last_error_ >= 0.0f) ? 1.0f : -1.0f;
-  const float left_speed = config_.search_speed_rad_s * direction;
-  const float right_speed = -config_.search_speed_rad_s * direction;
-  return MakeOutput(0U, last_error_, true, left_speed, right_speed);
+  const float left_speed = direction > 0.0f ? config_.search_speed_rad_s : 0.0f;
+  const float right_speed = direction > 0.0f ? 0.0f : config_.search_speed_rad_s;
+  return MakeOutput(0U, last_error_, lost_line, left_speed, right_speed);
 }
 
 Tracking::Output Tracking::Calculate(uint8_t black_mask, float dt_s)
 {
   if (black_mask == 0U)
   {
-    // active_mask 为 0 表示 GreySensor 8 路都没有检测到黑线，进入丢线搜索。
-    return MakeSearchOutput();
+    if (lost_sample_count_ != UINT32_MAX)
+    {
+      ++lost_sample_count_;
+    }
+
+    // 单帧采样空洞沿用上一有效目标，避免左右速度瞬间跳变。上电后尚无
+    // 有效样本时使用前进式搜索，但在达到确认帧数前不报告丢线。
+    if (lost_sample_count_ < config_.lost_confirm_samples)
+    {
+      if (has_last_error_)
+      {
+        Output transient = last_valid_output_;
+        transient.black_mask = 0U;
+        transient.lost_line = false;
+        return transient;
+      }
+      return MakeRecoveryOutput(false);
+    }
+
+    return MakeRecoveryOutput(true);
   }
 
+  const bool reacquired_line = lost_sample_count_ != 0U;
+  lost_sample_count_ = 0;
   const float error = CalculateError(black_mask);
   float derivative = 0.0f;
-  if (has_last_error_ && dt_s > 1e-6f)
+  if (has_last_error_ && !reacquired_line && dt_s > 1e-6f)
   {
     derivative = (error - last_error_) / dt_s;
   }
@@ -132,7 +153,9 @@ Tracking::Output Tracking::Calculate(uint8_t black_mask, float dt_s)
   last_error_ = error;
   has_last_error_ = true;
 
-  return MakeOutput(black_mask, error, false, left_speed, right_speed);
+  last_valid_output_ =
+      MakeOutput(black_mask, error, false, left_speed, right_speed);
+  return last_valid_output_;
 }
 
 void Tracking::Publish(Output output, const GreySensor::Sample& sample)

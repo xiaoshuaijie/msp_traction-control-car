@@ -1,0 +1,13 @@
+{
+  "status": "in_progress",
+  "completed": 3,
+  "failed": 0,
+  "skipped": 0,
+  "pending": 2,
+  "uncertain": 0,
+  "total": 5,
+  "done": 3,
+  "percent": 60,
+  "current": "为 `module/NRF24L01/NRF24L01.cpp` 补充四态状态机、轮询优先级、发送终态、恢复路径、消息发",
+  "updated_at": "2026-07-13 22:46:09"
+}

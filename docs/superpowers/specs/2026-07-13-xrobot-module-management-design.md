@@ -1,5 +1,9 @@
 # XRobot 模块管理分层设计
 
+> **已废弃（2026-07-13）**：本设计使用的 `NRF24L01App` 薄适配器已被完整的
+> `NRF24L01` Topic/Application 状态机取代，且装配清单已加入 Encoder。
+> 当前边界见 `.helloagents/modules/xrobot_modules.md`。
+
 ## 目标
 
 将可复用模块的组合与生命周期集中到根目录 `xrobot_main.hpp`，同时保留 `src/app_main.cpp` 对车辆硬件、驾驶状态机和控制循环的所有权。

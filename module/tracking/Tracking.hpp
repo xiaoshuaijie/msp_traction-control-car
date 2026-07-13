@@ -64,19 +64,22 @@ class Tracking : public LibXR::Application
   struct Config
   {
     /// 黑线位于中心时的基础前进速度，单位 rad/s。
-    float base_speed_rad_s = 8.0f;
+    float base_speed_rad_s = 7.0f;
 
     /// 正常循迹时单侧车轮目标速度上限，避免大误差时给速度环过高目标。
-    float max_speed_rad_s = 14.0f;
+    float max_speed_rad_s = 10.0f;
 
-    /// 丢线搜索速度，丢线时左右轮反向低速转动以找回黑线。
+    /// 丢线搜索速度，丢线时单侧车轮低速前进以找回黑线。
     float search_speed_rad_s = 3.0f;
 
     /// 循迹比例增益，误差越大，左右轮差速越大。
     float turn_kp = 1.6f;
 
     /// 循迹微分增益，默认关闭；高速摆动时可小幅启用。
-    float turn_kd = 0.0f;
+    float turn_kd = 0.00f;
+
+    /// 连续多少帧未检测到黑线后才确认丢线，用于过滤瞬时采样空洞。
+    uint8_t lost_confirm_samples = 2;
   };
 
   /**
@@ -200,8 +203,8 @@ class Tracking : public LibXR::Application
   /// 限制正常循迹速度范围；正常循迹不让单侧车轮反转。
   float ClampNormalSpeed(float speed) const;
 
-  /// 生成丢线搜索输出，根据最近一次有效误差决定向哪边找线。
-  Output MakeSearchOutput() const;
+  /// 生成前进式丢线恢复输出，根据最近一次有效误差决定向哪边找线。
+  Output MakeRecoveryOutput(bool lost_line) const;
 
   /// 填充序号、缓存最新输出，并发布到 "tracking" topic。
   void Publish(Output output, const GreySensor::Sample& sample);
@@ -226,6 +229,12 @@ class Tracking : public LibXR::Application
 
   /// 是否已经有过有效误差；没有历史误差时丢线搜索默认向右侧方向找线。
   bool has_last_error_ = false;
+
+  /// 最近一次有效循迹输出，单帧采样空洞时继续沿用以避免目标突变。
+  Output last_valid_output_{};
+
+  /// 连续未检测到黑线的样本数量。
+  uint32_t lost_sample_count_ = 0;
 
   /// 最近一次处理 GreySensor sample 的系统时间，单位 ms。
   uint32_t last_update_ms_ = 0;
