@@ -1,0 +1,46 @@
+name: XRobot module contract
+
+on:
+  push:
+    paths:
+      - "User/xrobot.yaml"
+      - "User/xrobot_main.hpp"
+      - "Modules/modules.yaml"
+      - "Modules/sources.yaml"
+      - "tests/verify_xrobot_module_contract.ps1"
+      - "tests/upstream_module_compile/**"
+      - ".github/workflows/xrobot-module-contract.yml"
+  pull_request:
+    paths:
+      - "User/xrobot.yaml"
+      - "User/xrobot_main.hpp"
+      - "Modules/modules.yaml"
+      - "Modules/sources.yaml"
+      - "tests/verify_xrobot_module_contract.ps1"
+      - "tests/upstream_module_compile/**"
+      - ".github/workflows/xrobot-module-contract.yml"
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install XRobot tools
+        run: python -m pip install --upgrade xrobot==0.3.1 libxr pyyaml requests
+      - name: Fetch configured modules
+        run: xrobot_setup
+      - name: Check committed generated entry
+        run: git diff --exit-code -- User/xrobot.yaml User/xrobot_main.hpp
+      - name: Verify generated module contracts
+        shell: pwsh
+        run: ./tests/verify_xrobot_module_contract.ps1
+      - name: Fetch upstream LibXR
+        run: git clone --depth=1 https://github.com/Jiu-xiao/libxr .cache/upstream-libxr
+      - name: Configure upstream API compile
+        run: cmake -S tests/upstream_module_compile -B .cache/upstream-module-build -DLIBXR_ROOT=${{ github.workspace }}/.cache/upstream-libxr
+      - name: Build against upstream LibXR
+        run: cmake --build .cache/upstream-module-build --config Release

@@ -1,0 +1,116 @@
+modules:
+- id: MPU6050_0
+  name: MPU6050
+  constructor_args:
+    topic_name: mpu6050
+    publish_period_ms: 10
+    recovery_period_ms: 100
+    sample_rate_hz: 200
+    filter: MPU6050::Filter::BAND_5HZ
+    gyro_range: MPU6050::GyroRange::DPS_250
+    accel_range: MPU6050::AccelRange::G_2
+    calibration_samples: 200
+    high_accel_threshold_g: 1.2
+    normal_two_kp: 20.0
+    normal_two_ki: 0.05
+    high_two_kp: 30.0
+    high_two_ki: 0.1
+    gyro_stable_threshold_rad_s: 0.002
+    yaw_stable_samples: 20
+    roll_offset_deg: -2.3
+    pitch_offset_deg: 5.0
+    yaw_offset_deg: 0.0
+    yaw_drift_compensation: 0.00003
+    task_stack_depth: 2048
+    thread_priority: LibXR::Thread::Priority::HIGH
+- id: NRF24L01_0
+  name: NRF24L01
+  constructor_args:
+    tx_address: [0x11, 0x22, 0x33, 0x44, 0x55]
+    rx_address: [0x11, 0x22, 0x33, 0x44, 0x55]
+    rf_channel: 2
+    data_rate: NRF24L01::DataRate::MBPS_2
+    output_power: NRF24L01::OutputPower::ZERO_DBM
+    retransmit_delay_us: 250
+    retransmit_count: 3
+    payload_mode: NRF24L01::PayloadMode::FIXED_32
+    tx_topic_name: nrf24l01_tx
+    rx_topic_name: nrf24l01_rx
+    status_topic_name: nrf24l01_status
+    spi_timeout_ms: 10
+    tx_timeout_ms: 10
+    recovery_period_ms: 100
+    heartbeat_period_ms: 1000
+    health_check_period_ms: 1000
+    worker_period_ms: 1
+    task_stack_depth: 1536
+    thread_priority: LibXR::Thread::Priority::MEDIUM
+- id: BitsButtonXR_0
+  name: BitsButtonXR
+  constructor_args:
+    single_buttons:
+    - key_alias: btn1
+      active_level: false
+      constraints:
+        short_press_time_ms: 50
+        long_press_start_time_ms: 1000
+        long_press_period_triger_ms: 500
+        time_window_time_ms: 300
+    - key_alias: btn2
+      active_level: false
+      constraints:
+        short_press_time_ms: 50
+        long_press_start_time_ms: 1000
+        long_press_period_triger_ms: 500
+        time_window_time_ms: 300
+    - key_alias: btn3
+      active_level: false
+      constraints:
+        short_press_time_ms: 50
+        long_press_start_time_ms: 1000
+        long_press_period_triger_ms: 500
+        time_window_time_ms: 300
+    combined_buttons:
+    - key_alias: btn1_btn2
+      suppress_single_keys: true
+      constituent_aliases:
+      - btn1
+      - btn2
+      constraints:
+        short_press_time_ms: 50
+        long_press_start_time_ms: 1000
+        long_press_period_triger_ms: 500
+        time_window_time_ms: 300
+- id: GreySensor_0
+  name: GreySensor
+  constructor_args:
+    channel_names:
+    - grey_sensor_gpio_0
+    - grey_sensor_gpio_1
+    - grey_sensor_gpio_2
+    - grey_sensor_gpio_3
+    - grey_sensor_gpio_4
+    - grey_sensor_gpio_5
+    - grey_sensor_gpio_6
+    - grey_sensor_gpio_7
+    active_low: false
+    topic_name: grey_sensor
+    publish_period_ms: 10
+- id: EventBinder_0
+  name: EventBinder
+  constructor_args:
+    modules:
+    - name: dr16
+      module_ref: '@dr16'
+    - name: cmd
+      module_ref: '@cmd'
+    event_binding_groups:
+    - bindings:
+      - source_module: dr16
+        source_event: DR16::SwitchPos::DR16_SW_R_POS_MID
+        target_module: cmd
+        target_event: CMD::Mode::CMD_OP_CTRL
+      - source_module: dr16
+        source_event: DR16::SwitchPos::DR16_SW_R_POS_BOT
+        target_module: cmd
+        target_event: CMD::Mode::CMD_OP_CTRL
