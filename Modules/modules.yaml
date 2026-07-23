@@ -1,0 +1,7 @@
+# XRobot module configuration example
+modules:
+  - jie-org/MPU6050
+  - jie-org/NRF24L01
+  - jie-org/BitsButtonXR
+  - xrobot-org/GreySensor
+  - qdu-future/EventBinder
